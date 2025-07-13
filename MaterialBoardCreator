@@ -1,0 +1,478 @@
+# Material Board Workflow 
+# This version creates sheets and returns selected materials without modifying parameters
+# ORIGINAL SCRIPT WRITTEN BY ANDREW MCCLELLAND. FOR USE ONLY BY CLAYCOMB ASSOCIATE ARCHITECTS. THIS IS NOT FOR USE BY ANY PARTY OR UNDER ANY LICENSE EXCEPT CLAYCOMB ASSOCIATES ARCHITECTS. 
+
+#
+# OUT[0] = Sheet (ViewSheet) - The created material board sheet
+# OUT[1] = Selected Materials (List<Material>) - Materials selected for the board
+# OUT[2] = All Materials (List<Material>) - All materials in the project
+# OUT[3] = Success (bool) - True if successful, False if error/cancelled
+# OUT[4] = Message (string) - Detailed status message
+# OUT[5] = Materials Updated (int) - Count of materials with Comments parameter updated
+# OUT[6] = Errors (List<string> or None) - Any errors encountered
+import sys
+sys.path.append('C:\\Program Files (x86)\\IronPython 2.7\\Lib')
+
+
+import clr
+clr.AddReference('RevitAPI')
+clr.AddReference('RevitAPIUI')
+clr.AddReference('RevitServices')
+clr.AddReference('System.Windows.Forms')
+clr.AddReference('System.Drawing')
+clr.AddReference('System.IO')
+
+from Autodesk.Revit.DB import *
+from RevitServices.Persistence import DocumentManager
+from RevitServices.Transactions import TransactionManager
+from System.Drawing import Point, Color, Font, Size, FontStyle, ContentAlignment
+from System.Windows.Forms import *
+from System.IO import File, Path
+
+doc = DocumentManager.Instance.CurrentDBDocument
+uiapp = DocumentManager.Instance.CurrentUIApplication
+app = uiapp.Application
+
+# Predefined titleblock paths
+TITLEBLOCK_PATHS = [
+    r"L:\REVIT\CLAYCOMB TEMPLATES\TITLEBLOCKS\DESIGN\DESIGN TITLEBLOCK 11 x 17.rfa",
+    r"L:\REVIT\CLAYCOMB TEMPLATES\TITLEBLOCKS\DESIGN\DESIGN TITLEBLOCK 24 x 36.rfa",
+    r"L:\REVIT\CLAYCOMB TEMPLATES\TITLEBLOCKS\DESIGN\DESIGN TITLEBLOCK 30 x 42.rfa"
+]
+
+# Material selection form with titleblock loading
+class MaterialSelectionForm(Form):
+    def __init__(self, materials, titleblocks):
+        self.Text = "Create Material Board"
+        self.Width = 620
+        self.Height = 580
+        self.BackColor = Color.FromArgb(240, 240, 240)
+        self.StartPosition = FormStartPosition.CenterScreen
+        
+        self.selected_materials = []
+        self.selected_titleblock = None
+        self.sheet_name = "Material Board"
+        self.sheet_number = "MB-001"
+        
+        # Title
+        title = Label()
+        title.Text = "Material Board Creator"
+        title.Location = Point(10, 10)
+        title.Size = Size(580, 35)
+        title.Font = Font("Arial", 16, FontStyle.Bold)
+        title.TextAlign = ContentAlignment.MiddleCenter
+        self.Controls.Add(title)
+        
+        # Sheet info
+        sheet_label = Label()
+        sheet_label.Text = "Sheet Information:"
+        sheet_label.Location = Point(10, 55)
+        sheet_label.Size = Size(200, 25)
+        sheet_label.Font = Font("Arial", 11, FontStyle.Bold)
+        self.Controls.Add(sheet_label)
+        
+        # Sheet name
+        name_label = Label()
+        name_label.Text = "Sheet Name:"
+        name_label.Location = Point(10, 85)
+        name_label.Size = Size(100, 25)
+        name_label.Font = Font("Arial", 10)
+        self.Controls.Add(name_label)
+        
+        self.name_box = TextBox()
+        self.name_box.Text = self.sheet_name
+        self.name_box.Location = Point(120, 85)
+        self.name_box.Size = Size(180, 25)
+        self.name_box.Font = Font("Arial", 10)
+        self.Controls.Add(self.name_box)
+        
+        # Sheet number
+        number_label = Label()
+        number_label.Text = "Sheet Number:"
+        number_label.Location = Point(320, 85)
+        number_label.Size = Size(110, 25)
+        number_label.Font = Font("Arial", 10)
+        self.Controls.Add(number_label)
+        
+        self.number_box = TextBox()
+        self.number_box.Text = self.sheet_number
+        self.number_box.Location = Point(440, 85)
+        self.number_box.Size = Size(120, 25)
+        self.number_box.Font = Font("Arial", 10)
+        self.Controls.Add(self.number_box)
+        
+        # Titleblock section with load button
+        tb_label = Label()
+        tb_label.Text = "Titleblock Selection:"
+        tb_label.Location = Point(10, 125)
+        tb_label.Size = Size(200, 25)
+        tb_label.Font = Font("Arial", 11, FontStyle.Bold)
+        self.Controls.Add(tb_label)
+        
+        # Load Claycomb titleblocks button
+        load_tb_btn = Button()
+        load_tb_btn.Text = "Load Claycomb Titleblocks"
+        load_tb_btn.Location = Point(10, 155)
+        load_tb_btn.Size = Size(200, 30)
+        load_tb_btn.Font = Font("Arial", 10)
+        load_tb_btn.BackColor = Color.FromArgb(0, 150, 0)
+        load_tb_btn.ForeColor = Color.White
+        load_tb_btn.Click += self.load_titleblocks
+        self.Controls.Add(load_tb_btn)
+        
+        # Refresh titleblocks button
+        refresh_tb_btn = Button()
+        refresh_tb_btn.Text = "Refresh List"
+        refresh_tb_btn.Location = Point(220, 155)
+        refresh_tb_btn.Size = Size(120, 30)
+        refresh_tb_btn.Font = Font("Arial", 10)
+        refresh_tb_btn.Click += self.refresh_titleblocks
+        self.Controls.Add(refresh_tb_btn)
+        
+        # Titleblock dropdown
+        self.tb_combo = ComboBox()
+        self.tb_combo.Location = Point(10, 195)
+        self.tb_combo.Size = Size(580, 30)
+        self.tb_combo.Font = Font("Arial", 10)
+        self.tb_combo.DropDownStyle = ComboBoxStyle.DropDownList
+        
+        # Populate titleblocks
+        self.titleblocks = titleblocks
+        self.populate_titleblocks()
+        
+        self.tb_combo.SelectedIndexChanged += self.tb_changed
+        self.Controls.Add(self.tb_combo)
+        
+        # Materials selection
+        mat_label = Label()
+        mat_label.Text = "Select Materials to Include on Material Board:"
+        mat_label.Location = Point(10, 235)
+        mat_label.Size = Size(380, 25)
+        mat_label.Font = Font("Arial", 11, FontStyle.Bold)
+        self.Controls.Add(mat_label)
+        
+        # Info label
+        info_label = Label()
+        info_label.Text = "Selected materials will have Comments parameter set to 'showonMB'"
+        info_label.Location = Point(10, 265)
+        info_label.Size = Size(580, 20)
+        info_label.Font = Font("Arial", 9, FontStyle.Italic)
+        info_label.ForeColor = Color.FromArgb(100, 100, 100)
+        self.Controls.Add(info_label)
+        
+        # Material list with checkboxes
+        self.mat_list = CheckedListBox()
+        self.mat_list.Location = Point(10, 290)
+        self.mat_list.Size = Size(580, 180)
+        self.mat_list.Font = Font("Arial", 10)
+        self.mat_list.CheckOnClick = True
+        
+        # Add materials
+        self.materials = materials
+        for mat in materials:
+            self.mat_list.Items.Add(mat.Name, False)
+        
+        self.Controls.Add(self.mat_list)
+        
+        # Status label
+        self.status_label = Label()
+        self.status_label.Text = "Ready to create material board"
+        self.status_label.Location = Point(10, 480)
+        self.status_label.Size = Size(580, 25)
+        self.status_label.Font = Font("Arial", 10)
+        self.status_label.ForeColor = Color.Blue
+        self.Controls.Add(self.status_label)
+        
+        # Buttons
+        check_all_btn = Button()
+        check_all_btn.Text = "Check All"
+        check_all_btn.Location = Point(10, 515)
+        check_all_btn.Size = Size(90, 30)
+        check_all_btn.Font = Font("Arial", 10)
+        check_all_btn.Click += self.check_all
+        self.Controls.Add(check_all_btn)
+        
+        uncheck_all_btn = Button()
+        uncheck_all_btn.Text = "Uncheck All"
+        uncheck_all_btn.Location = Point(110, 515)
+        uncheck_all_btn.Size = Size(90, 30)
+        uncheck_all_btn.Font = Font("Arial", 10)
+        uncheck_all_btn.Click += self.uncheck_all
+        self.Controls.Add(uncheck_all_btn)
+        
+        # Cancel button
+        cancel_btn = Button()
+        cancel_btn.Text = "Cancel"
+        cancel_btn.Location = Point(320, 515)
+        cancel_btn.Size = Size(90, 30)
+        cancel_btn.Font = Font("Arial", 10)
+        cancel_btn.Click += self.cancel_click
+        self.Controls.Add(cancel_btn)
+        
+        # Create button
+        create_btn = Button()
+        create_btn.Text = "Create Material Board"
+        create_btn.Location = Point(420, 515)
+        create_btn.Size = Size(170, 40)
+        create_btn.Font = Font("Arial", 11, FontStyle.Bold)
+        create_btn.BackColor = Color.FromArgb(0, 120, 215)
+        create_btn.ForeColor = Color.White
+        create_btn.Click += self.create_board
+        self.Controls.Add(create_btn)
+    
+    def populate_titleblocks(self):
+        """Populate the titleblock dropdown"""
+        self.tb_combo.Items.Clear()
+        
+        if not self.titleblocks:
+            self.tb_combo.Items.Add("No titleblocks found - Click 'Load Claycomb Titleblocks'")
+            self.selected_titleblock = None
+            return
+        
+        for i, (tb, name) in enumerate(self.titleblocks):
+            self.tb_combo.Items.Add(name)
+            if i == 0:
+                self.tb_combo.SelectedIndex = 0
+                self.selected_titleblock = tb
+    
+    def load_titleblocks(self, sender, args):
+        """Load the predefined Claycomb titleblocks"""
+        self.status_label.Text = "Loading titleblocks..."
+        self.status_label.ForeColor = Color.Orange
+        
+        try:
+            TransactionManager.Instance.EnsureInTransaction(doc)
+            
+            loaded_count = 0
+            for tb_path in TITLEBLOCK_PATHS:
+                if File.Exists(tb_path):
+                    try:
+                        # Load the family
+                        success = doc.LoadFamily(tb_path)
+                        if success:
+                            loaded_count += 1
+                            filename = Path.GetFileNameWithoutExtension(tb_path)
+                            self.status_label.Text = "Loaded: {}".format(filename)
+                    except Exception as e:
+                        self.status_label.Text = "Error loading {}: {}".format(Path.GetFileName(tb_path), str(e))
+                        self.status_label.ForeColor = Color.Red
+                else:
+                    self.status_label.Text = "File not found: {}".format(tb_path)
+                    self.status_label.ForeColor = Color.Red
+            
+            TransactionManager.Instance.TransactionTaskDone()
+            
+            if loaded_count > 0:
+                self.status_label.Text = "Loaded {} titleblock(s). Refreshing list...".format(loaded_count)
+                self.status_label.ForeColor = Color.Green
+                # Refresh the titleblock list
+                self.refresh_titleblocks(sender, args)
+            else:
+                self.status_label.Text = "No titleblocks were loaded"
+                self.status_label.ForeColor = Color.Red
+                
+        except Exception as e:
+            TransactionManager.Instance.TransactionTaskDone()
+            self.status_label.Text = "Error: {}".format(str(e))
+            self.status_label.ForeColor = Color.Red
+    
+    def refresh_titleblocks(self, sender, args):
+        """Refresh the titleblock list"""
+        self.titleblocks = get_titleblocks()
+        self.populate_titleblocks()
+        self.status_label.Text = "Titleblock list refreshed"
+        self.status_label.ForeColor = Color.Blue
+    
+    def tb_changed(self, sender, args):
+        if self.tb_combo.SelectedIndex >= 0 and self.titleblocks and len(self.titleblocks) > self.tb_combo.SelectedIndex:
+            self.selected_titleblock = self.titleblocks[self.tb_combo.SelectedIndex][0]
+    
+    def check_all(self, sender, args):
+        for i in range(self.mat_list.Items.Count):
+            self.mat_list.SetItemChecked(i, True)
+    
+    def uncheck_all(self, sender, args):
+        for i in range(self.mat_list.Items.Count):
+            self.mat_list.SetItemChecked(i, False)
+    
+    def create_board(self, sender, args):
+        # Get selected materials
+        self.selected_materials = []
+        for i in range(self.mat_list.Items.Count):
+            if self.mat_list.GetItemChecked(i):
+                self.selected_materials.append(self.materials[i])
+        
+        # Get sheet info
+        self.sheet_name = self.name_box.Text
+        self.sheet_number = self.number_box.Text
+        
+        # Validate
+        if not self.selected_materials:
+            MessageBox.Show("Please select at least one material.", "No Materials Selected", MessageBoxButtons.OK, MessageBoxIcon.Warning)
+            return
+        
+        if not self.selected_titleblock:
+            MessageBox.Show("Please select a titleblock or load Claycomb titleblocks first.", "No Titleblock Selected", MessageBoxButtons.OK, MessageBoxIcon.Warning)
+            return
+        
+        self.DialogResult = DialogResult.OK
+        self.Close()
+    
+    def cancel_click(self, sender, args):
+        self.DialogResult = DialogResult.Cancel
+        self.Close()
+
+# Function to create material board sheet and set comments
+def create_material_board_sheet(all_materials, selected_materials, titleblock_type, sheet_name, sheet_number):
+    TransactionManager.Instance.EnsureInTransaction(doc)
+    
+    try:
+        # Create sheet
+        sheet = ViewSheet.Create(doc, titleblock_type.Id)
+        sheet.Name = sheet_name
+        sheet.SheetNumber = sheet_number
+        
+        # Set Comments parameter for all materials
+        materials_updated = 0
+        errors = []
+        
+        for material in all_materials:
+            try:
+                # Get the Comments parameter
+                comments_param = material.get_Parameter(BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS)
+                if not comments_param:
+                    # Try alternative parameter
+                    comments_param = material.LookupParameter("Comments")
+                
+                if comments_param and not comments_param.IsReadOnly:
+                    # Set to "showonMB" if material is selected, clear if not
+                    if material in selected_materials:
+                        comments_param.Set("showonMB")
+                    else:
+                        # Clear the parameter or set to empty string
+                        current_value = comments_param.AsString()
+                        if current_value == "showonMB":
+                            comments_param.Set("")
+                    materials_updated += 1
+                else:
+                    if not comments_param:
+                        errors.append("Material '{}' does not have Comments parameter".format(material.Name))
+                    else:
+                        errors.append("Comments parameter is read-only for material '{}'".format(material.Name))
+                        
+            except Exception as e:
+                errors.append("Error setting parameter for {}: {}".format(material.Name, str(e)))
+        
+        TransactionManager.Instance.TransactionTaskDone()
+        
+        return sheet, materials_updated, errors
+        
+    except Exception as e:
+        TransactionManager.Instance.TransactionTaskDone()
+        raise e
+
+# Get all materials
+def get_all_materials():
+    collector = FilteredElementCollector(doc)
+    materials = collector.OfClass(Material).ToElements()
+    # Sort by name
+    return sorted(materials, key=lambda m: m.Name)
+
+# Get titleblocks
+def get_titleblocks():
+    try:
+        collector = FilteredElementCollector(doc)
+        titleblocks = collector.OfCategory(BuiltInCategory.OST_TitleBlocks).WhereElementIsElementType()
+        result = []
+        for tb in titleblocks:
+            name_param = tb.get_Parameter(BuiltInParameter.SYMBOL_NAME_PARAM)
+            name = "{} : {}".format(tb.FamilyName, name_param.AsString() if name_param else "Unknown")
+            result.append((tb, name))
+        return result
+    except Exception as e:
+        # Return empty list if there's an error
+        return []
+
+# Main execution
+try:
+    materials = get_all_materials()
+    titleblocks = get_titleblocks()
+
+    # Show form
+    form = MaterialSelectionForm(materials, titleblocks)
+    
+    if form.ShowDialog() == DialogResult.OK:
+        try:
+            sheet, updated_count, errors = create_material_board_sheet(
+                materials,  # All materials
+                form.selected_materials,  # Selected materials
+                form.selected_titleblock,
+                form.sheet_name,
+                form.sheet_number
+            )
+            
+            # Prepare output message
+            message = "Created sheet '{}' with sheet number '{}'.\n\n".format(form.sheet_name, form.sheet_number)
+            message += "Updated Comments parameter for {} materials:\n".format(updated_count)
+            message += "- {} materials set to 'showonMB'\n".format(len(form.selected_materials))
+            message += "- {} materials cleared/unchanged\n".format(len(materials) - len(form.selected_materials))
+            
+            if errors:
+                message += "\n\nWarnings:\n"
+                for error in errors[:5]:  # Show first 5 errors
+                    message += "- {}\n".format(error)
+                if len(errors) > 5:
+                    message += "... and {} more warnings".format(len(errors) - 5)
+            
+            # Output as list for easy indexing
+            # OUT[0] = Sheet
+            # OUT[1] = Selected Materials
+            # OUT[2] = All Materials
+            # OUT[3] = Success (Boolean)
+            # OUT[4] = Message
+            # OUT[5] = Total Materials Updated
+            # OUT[6] = Errors (if any)
+            
+            OUT = [
+                sheet,                          # Index 0: The created sheet
+                form.selected_materials,        # Index 1: List of selected materials
+                materials,                      # Index 2: List of all materials
+                True,                          # Index 3: Success status
+                message,                       # Index 4: Detailed message
+                updated_count,                 # Index 5: Number of materials updated
+                errors if errors else None     # Index 6: List of errors (or None)
+            ]
+        except Exception as e:
+            # Error output format
+            OUT = [
+                None,                          # Index 0: No sheet
+                None,                          # Index 1: No selected materials
+                materials,                     # Index 2: All materials (still available)
+                False,                         # Index 3: Success = False
+                "Error creating material board: " + str(e),  # Index 4: Error message
+                0,                            # Index 5: No materials updated
+                [str(e)]                      # Index 6: Error as list
+            ]
+    else:
+        # Cancelled output format
+        OUT = [
+            None,                              # Index 0: No sheet
+            None,                              # Index 1: No selected materials
+            materials,                         # Index 2: All materials (still available)
+            False,                             # Index 3: Success = False
+            "Cancelled by user",               # Index 4: Message
+            0,                                # Index 5: No materials updated
+            None                              # Index 6: No errors
+        ]
+
+except Exception as e:
+    # Script error output format
+    OUT = [
+        None,                                  # Index 0: No sheet
+        None,                                  # Index 1: No selected materials
+        None,                                  # Index 2: No materials
+        False,                                 # Index 3: Success = False
+        "Script error: " + str(e),             # Index 4: Error message
+        0,                                    # Index 5: No materials updated
+        [str(e)]                              # Index 6: Error as list
+    ]
